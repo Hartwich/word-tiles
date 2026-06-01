@@ -1,6 +1,7 @@
 {
   "name": "@open-party-lab/game-word-tiles",
   "version": "0.1.0",
+  "description": "Shared word-board tile game for Open Party Lab with phone rack controls and premium fields.",
   "private": false,
   "license": "Apache-2.0",
   "type": "module",
@@ -35,7 +36,8 @@
   "files": [
     "dist",
     "README.md",
-    "AGENTS.md"
+    "AGENTS.md",
+    "docs"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
