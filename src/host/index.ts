@@ -71,6 +71,10 @@ function text(language?: SupportedLanguage) {
     active: en ? "Turn" : "Am Zug",
     bag: en ? "Bag" : "Beutel",
     move: en ? "Move" : "Zug",
+    pendingMove: en ? "Open move" : "Offener Zug",
+    challengedBy: en ? "Challenged by" : "Angezweifelt von",
+    accepted: en ? "accepted" : "akzeptiert",
+    activeTurn: en ? "This turn" : "Dieser Zug",
     lastMove: en ? "Last move" : "Letzter Zug",
     waiting: en ? "Waiting for Word Tiles state." : "Warte auf Word-Tiles-Zustand.",
     rack: en ? "Rack" : "Rack",
@@ -244,8 +248,64 @@ export class WordTilesHostScene extends Phaser.Scene {
       })
       .setOrigin(0, 0);
 
+    let y = panelTop + 154;
+
+    if (state.activeTurn) {
+      const turnWords = state.activeTurn.words.map((word) => `${word.word} (${word.score})`).join(", ");
+
+      this.add
+        .text(panelX + 22, y, labels.activeTurn, {
+          fontFamily: hostTheme.titleFont,
+          fontSize: "20px",
+          color: hostTheme.accent
+        })
+        .setOrigin(0, 0);
+      this.add
+        .text(panelX + 22, y + 28, [
+          `${state.activeTurn.playerName}: ${state.activeTurn.score} ${labels.points}${state.activeTurn.bingoEligible ? " +50" : ""}`,
+          turnWords
+        ].filter(Boolean).join("\n"), {
+          fontFamily: hostTheme.bodyFont,
+          fontSize: "15px",
+          color: hostTheme.muted,
+          lineSpacing: 5,
+          wordWrap: { width: panelWidth - 44 }
+        })
+        .setOrigin(0, 0);
+      y += 82;
+    }
+
+    if (state.pendingMove) {
+      const challengeStatus = state.pendingMove.challengedByName
+        ? `${labels.challengedBy}: ${state.pendingMove.challengedByName}`
+        : `${state.pendingMove.acceptedByPlayerIds.length}/${state.pendingMove.requiredAcceptancePlayerIds.length} ${labels.accepted}`;
+      const pendingWords = state.pendingMove.words.map((word) => `${word.word} (${word.score})`).join(", ");
+
+      this.add
+        .text(panelX + 22, y, labels.pendingMove, {
+          fontFamily: hostTheme.titleFont,
+          fontSize: "20px",
+          color: state.pendingMove.challengedByName ? hostTheme.danger : hostTheme.warning
+        })
+        .setOrigin(0, 0);
+      this.add
+        .text(panelX + 22, y + 28, [
+          `${state.pendingMove.playerName}: ${state.pendingMove.score} ${labels.points}`,
+          pendingWords,
+          challengeStatus
+        ].filter(Boolean).join("\n"), {
+          fontFamily: hostTheme.bodyFont,
+          fontSize: "15px",
+          color: hostTheme.muted,
+          lineSpacing: 5,
+          wordWrap: { width: panelWidth - 44 }
+        })
+        .setOrigin(0, 0);
+      y += 88;
+    }
+
     const sortedPlayers = [...state.players].sort((left, right) => right.score - left.score);
-    let y = panelTop + 164;
+    y += 10;
 
     sortedPlayers.forEach((player, index) => {
       const active = player.playerId === state.activePlayerId;

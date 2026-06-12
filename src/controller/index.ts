@@ -1,16 +1,23 @@
 import { wordTilesManifest } from "../manifest.js";
 import type {
+  WordTilesActiveTurnState,
   WordTilesBoardCellState,
   WordTilesControllerState,
   WordTilesMoveSummaryState,
+  WordTilesPendingMoveState,
   WordTilesPlacementState,
   WordTilesPlayerPublicState,
   WordTilesRackTileState
 } from "../protocol.js";
 import {
+  createWordTilesAcceptInput,
+  createWordTilesChallengeInput,
+  createWordTilesConfirmInput,
   createWordTilesExchangeInput,
+  createWordTilesFinishTurnInput,
   createWordTilesPassInput,
-  createWordTilesPlayInput
+  createWordTilesPlayInput,
+  createWordTilesRecallInput
 } from "./wordTilesBindings.js";
 
 type SupportedLanguage = "de" | "en";
@@ -35,11 +42,23 @@ interface WordTilesLayoutModel {
   activePlayerId: string | null;
   activePlayerName: string | null;
   lastMove?: WordTilesMoveSummaryState;
+  pendingMove?: WordTilesPendingMoveState;
+  activeTurn?: WordTilesActiveTurnState;
   lastError?: string;
   tileValues: Record<string, number>;
+  canAcceptPendingMove: boolean;
+  canChallenge: boolean;
+  canResolvePendingMove: boolean;
+  canRecallPendingMove: boolean;
+  canFinishTurn: boolean;
   onPlay: (placements: WordTilesPlacementState[]) => void;
   onPass: () => void;
   onExchange: (tileIds: string[]) => void;
+  onAcceptPendingMove: (pendingMoveId: string) => void;
+  onChallenge: (pendingMoveId: string) => void;
+  onConfirmPendingMove: (pendingMoveId: string) => void;
+  onRecallPendingMove: (pendingMoveId: string) => void;
+  onFinishTurn: () => void;
 }
 
 interface ControllerGameRenderContext {
@@ -69,6 +88,8 @@ export function buildWordTilesControllerModel(context: ControllerGameRenderConte
   const playerId = state.player?.id ?? "";
   const gameState = (state.game?.state ?? {}) as Partial<WordTilesControllerState>;
   const en = state.room?.language === "en";
+  const pendingMove = gameState.pendingMove;
+  const activeTurn = gameState.activeTurn;
   const activeName = gameState.activePlayerName ?? (en ? "waiting" : "warte");
   const score =
     gameState.players?.find((player) => player.playerId === playerId)?.score ??
@@ -83,12 +104,27 @@ export function buildWordTilesControllerModel(context: ControllerGameRenderConte
       ? gameState.winnerName
         ? `${en ? "Winner" : "Gewinner"}: ${gameState.winnerName}`
         : en ? "Draw" : "Unentschieden"
+      : pendingMove
+        ? pendingMove.challengedByName
+          ? `${en ? "Challenged" : "Angezweifelt"}: ${pendingMove.playerName}`
+          : `${en ? "Open move" : "Offener Zug"}: ${pendingMove.playerName}`
+      : activeTurn
+        ? `${en ? "Turn score" : "Zugpunkte"}: ${activeTurn.score}`
       : `${en ? "Turn" : "Zug"}: ${activeName}`,
-    helperText: state.game?.message ?? (en ? "Place a valid word." : "Lege ein gueltiges Wort."),
+    helperText: state.game?.message ?? (en ? "Place a word." : "Lege ein Wort."),
     language: state.room?.language,
     disabled: state.game?.phase !== "playing" || !gameState.canAct,
     canAct: Boolean(gameState.canAct && state.game?.phase === "playing"),
-    resetKey: `${state.game?.roundNumber ?? 0}:${gameState.moveNumber ?? 0}:${gameState.activePlayerId ?? "none"}`,
+    resetKey: [
+      state.game?.roundNumber ?? 0,
+      gameState.moveNumber ?? 0,
+      gameState.activePlayerId ?? "none",
+      pendingMove?.id ?? "none",
+      pendingMove?.challengedByPlayerId ?? "none",
+      pendingMove?.acceptedByPlayerIds.join(",") ?? "none",
+      activeTurn?.acceptedMoveCount ?? 0,
+      activeTurn?.placedTileCount ?? 0
+    ].join(":"),
     boardSize: gameState.boardSize ?? 15,
     board: gameState.board ?? [],
     rack: gameState.rack ?? [],
@@ -100,11 +136,23 @@ export function buildWordTilesControllerModel(context: ControllerGameRenderConte
     activePlayerId: gameState.activePlayerId ?? null,
     activePlayerName: gameState.activePlayerName ?? null,
     lastMove: gameState.lastMove,
+    pendingMove,
+    activeTurn,
     lastError: gameState.lastError,
     tileValues: gameState.tileValues ?? {},
+    canAcceptPendingMove: Boolean(gameState.canAcceptPendingMove && state.game?.phase === "playing"),
+    canChallenge: Boolean(gameState.canChallenge && state.game?.phase === "playing"),
+    canResolvePendingMove: Boolean(gameState.canResolvePendingMove && state.game?.phase === "playing"),
+    canRecallPendingMove: Boolean(gameState.canRecallPendingMove && state.game?.phase === "playing"),
+    canFinishTurn: Boolean(gameState.canFinishTurn && state.game?.phase === "playing"),
     onPlay: (placements) => onInput(createWordTilesPlayInput(playerId, placements)),
     onPass: () => onInput(createWordTilesPassInput(playerId)),
-    onExchange: (tileIds) => onInput(createWordTilesExchangeInput(playerId, tileIds))
+    onExchange: (tileIds) => onInput(createWordTilesExchangeInput(playerId, tileIds)),
+    onAcceptPendingMove: (pendingMoveId) => onInput(createWordTilesAcceptInput(playerId, pendingMoveId)),
+    onChallenge: (pendingMoveId) => onInput(createWordTilesChallengeInput(playerId, pendingMoveId)),
+    onConfirmPendingMove: (pendingMoveId) => onInput(createWordTilesConfirmInput(playerId, pendingMoveId)),
+    onRecallPendingMove: (pendingMoveId) => onInput(createWordTilesRecallInput(playerId, pendingMoveId)),
+    onFinishTurn: () => onInput(createWordTilesFinishTurnInput(playerId))
   };
 }
 

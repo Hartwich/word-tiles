@@ -6,7 +6,7 @@ Shared word-board tile game for Open Party Lab with phone rack controls and prem
 
 ## Status
 
-Alpha. The board and rack loop is playable. Needs dictionary/rules review, scoring polish, and UX passes for small phones.
+Alpha. The board and rack loop is playable. Players can place multiple accepted word sections before finishing a turn. Word validity is handled by table challenges outside the app. Needs scoring polish and UX passes for small phones.
 
 ## Run Through Open Party Lab
 
@@ -69,4 +69,4 @@ For visual checks, start Open Party Lab, add virtual controllers when needed, an
 
 Code is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
 
-Assets, generated media, word lists, prompts, and third-party references may need separate rights review before public store distribution.
+Assets, generated media, prompts, and third-party references may need separate rights review before public store distribution.

@@ -9,10 +9,12 @@ import {
   type SupportedLanguage
 } from "@open-party-lab/game-core";
 import type {
+  WordTilesActiveTurnState,
   WordTilesBoardCellState,
   WordTilesControllerState,
   WordTilesInput,
   WordTilesMoveSummaryState,
+  WordTilesPendingMoveState,
   WordTilesPlacedTileState,
   WordTilesPlacementState,
   WordTilesPlayerPublicState,
@@ -21,7 +23,6 @@ import type {
   WordTilesWordScoreState
 } from "../protocol.js";
 import { wordTilesManifest } from "../manifest.js";
-import { isWordTilesAllowedWord, normalizeWordTilesWord } from "./wordTilesLexicon.js";
 import {
   createWordTilesBag,
   resolveWordTilesBonus,
@@ -64,6 +65,8 @@ interface WordTilesRuntimeState extends BaseRoundState {
   winnerPlayerId?: string;
   winnerName?: string;
   lastMove?: WordTilesMoveSummaryState;
+  pendingMove?: WordTilesPendingMoveRuntimeState;
+  activeTurn?: WordTilesActiveTurnRuntimeState;
   lastError?: string;
 }
 
@@ -84,16 +87,36 @@ interface MoveEvaluation {
   placements: PreparedPlacement[];
   words: WordTilesWordScoreState[];
   score: number;
-  bingo: boolean;
 }
+
+interface WordTilesPendingMoveRuntimeState extends WordTilesPendingMoveState {
+  preparedPlacements: PreparedPlacement[];
+}
+
+interface WordTilesActiveTurnRuntimeState extends WordTilesActiveTurnState {}
 
 const playableBlankLetters = "ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ".split("");
 
+function normalizeWordTilesLetter(letter: string): string {
+  return Array.from(letter.trim().toLocaleUpperCase("de-DE"))[0] ?? "";
+}
+
 const wordTilesText = {
   de: {
-    intro: "Word Tiles: Lege gueltige Woerter auf dem gemeinsamen Brett.",
+    intro: "Word Tiles: Lege Woerter auf dem gemeinsamen Brett.",
     start: (name: string) => `${name} beginnt. Erstes Wort muss ueber den Stern in der Mitte.`,
     notYourTurn: "Du bist gerade nicht am Zug.",
+    pendingMoveActive: "Entscheidet zuerst den offenen Word-Tiles-Zug.",
+    finishTurnFirst: "Schliesse deinen laufenden Zug erst mit Fertig ab.",
+    noPendingMove: "Es liegt kein offener Zug vor.",
+    stalePendingMove: "Dieser offene Zug ist nicht mehr aktuell.",
+    cannotChallengeOwn: "Du kannst deinen eigenen Zug nicht anzweifeln.",
+    cannotAcceptOwn: "Du musst deinen eigenen Zug nicht akzeptieren.",
+    alreadyAccepted: "Du hast diesen Zug schon akzeptiert.",
+    alreadyChallenged: "Dieser Zug wurde bereits angezweifelt.",
+    notPendingPlayer: "Nur die legende Person kann diesen Zug entscheiden.",
+    notChallenged: "Zuruecknehmen ist erst nach einer Anzweiflung moeglich.",
+    noActiveTurn: "Lege zuerst ein akzeptiertes Wort oder passe.",
     noTiles: "Lege mindestens einen Stein.",
     badLine: "Neue Steine muessen in einer geraden Zeile oder Spalte liegen.",
     badGap: "Zwischen neuen Steinen darf kein leeres Feld entstehen.",
@@ -107,9 +130,19 @@ const wordTilesText = {
     firstTooShort: "Das erste Wort braucht mindestens zwei Buchstaben.",
     mustConnect: "Dein Zug muss an mindestens einen vorhandenen Stein anschliessen.",
     noWord: "Aus diesen Steinen entsteht kein neues Wort.",
-    invalidWords: (words: string[]) => `Nicht in der Wortliste: ${words.join(", ")}.`,
+    pendingMove: (name: string, score: number, words: string[]) =>
+      `${name} legt ${words.join(", ")} fuer ${score} Punkte. Andere koennen akzeptieren oder anzweifeln.`,
+    acceptedWaiting: (name: string, accepted: number, required: number) =>
+      `${name} akzeptiert. Warte auf ${accepted}/${required} Akzeptanzen.`,
+    acceptedMove: (name: string, score: number) =>
+      `Alle akzeptieren. ${name} kann weiterlegen oder mit Fertig ${score} Punkte abschliessen.`,
+    challenged: (challengerName: string, playerName: string) =>
+      `${challengerName} zweifelt ${playerName}s Wort an. Prueft extern und entscheidet.`,
     played: (name: string, score: number, words: string[]) =>
       `${name} legt ${words.join(", ")} fuer ${score} Punkte.`,
+    finished: (name: string, score: number, words: string[]) =>
+      `${name} beendet den Zug mit ${words.join(", ")} fuer ${score} Punkte.`,
+    recalled: (name: string) => `${name} nimmt den Zug zurueck.`,
     bingo: "Bingo! Alle sieben Steine gelegt.",
     pass: (name: string) => `${name} passt.`,
     exchange: (name: string, count: number) => `${name} tauscht ${count} Stein${count === 1 ? "" : "e"}.`,
@@ -119,9 +152,20 @@ const wordTilesText = {
     draw: "Word Tiles endet unentschieden."
   },
   en: {
-    intro: "Word Tiles: Place valid words on the shared board.",
+    intro: "Word Tiles: Place words on the shared board.",
     start: (name: string) => `${name} starts. The first word must cross the center star.`,
     notYourTurn: "It is not your turn.",
+    pendingMoveActive: "Resolve the open Word Tiles move first.",
+    finishTurnFirst: "Finish your active turn first.",
+    noPendingMove: "There is no open move.",
+    stalePendingMove: "That open move is no longer current.",
+    cannotChallengeOwn: "You cannot challenge your own move.",
+    cannotAcceptOwn: "You do not need to accept your own move.",
+    alreadyAccepted: "You already accepted this move.",
+    alreadyChallenged: "This move has already been challenged.",
+    notPendingPlayer: "Only the player who placed the move can resolve it.",
+    notChallenged: "A move can only be recalled after it has been challenged.",
+    noActiveTurn: "Place an accepted word first or pass.",
     noTiles: "Place at least one tile.",
     badLine: "New tiles must share one row or column.",
     badGap: "There cannot be an empty gap between new tiles.",
@@ -135,9 +179,19 @@ const wordTilesText = {
     firstTooShort: "The first word needs at least two letters.",
     mustConnect: "Your move must connect to at least one existing tile.",
     noWord: "These tiles do not create a new word.",
-    invalidWords: (words: string[]) => `Not in the word list: ${words.join(", ")}.`,
+    pendingMove: (name: string, score: number, words: string[]) =>
+      `${name} places ${words.join(", ")} for ${score} points. Other players may accept or challenge.`,
+    acceptedWaiting: (name: string, accepted: number, required: number) =>
+      `${name} accepts. Waiting for ${accepted}/${required} acceptances.`,
+    acceptedMove: (name: string, score: number) =>
+      `Everyone accepts. ${name} can continue placing or finish ${score} points.`,
+    challenged: (challengerName: string, playerName: string) =>
+      `${challengerName} challenges ${playerName}'s word. Check it externally and decide.`,
     played: (name: string, score: number, words: string[]) =>
       `${name} scores ${score} with ${words.join(", ")}.`,
+    finished: (name: string, score: number, words: string[]) =>
+      `${name} finishes the turn with ${words.join(", ")} for ${score} points.`,
+    recalled: (name: string) => `${name} recalls the move.`,
     bingo: "Bingo! All seven tiles played.",
     pass: (name: string) => `${name} passes.`,
     exchange: (name: string, count: number) => `${name} exchanges ${count} tile${count === 1 ? "" : "s"}.`,
@@ -299,7 +353,7 @@ function preparePlacements(
       return { ok: false, error: text.occupied as string };
     }
 
-    const normalizedLetter = normalizeWordTilesWord(inputPlacement.letter).slice(0, 1);
+    const normalizedLetter = normalizeWordTilesLetter(inputPlacement.letter);
 
     if (rackTile.isBlank) {
       if (!playableBlankLetters.includes(normalizedLetter)) {
@@ -572,26 +626,16 @@ function evaluateMove(
     return { ok: false, error: boardHadTiles ? (text.noWord as string) : (text.firstTooShort as string) };
   }
 
-  const invalidWords = collectedWords
-    .map((word) => word.word)
-    .filter((word) => !isWordTilesAllowedWord(word));
-
-  if (invalidWords.length > 0) {
-    return { ok: false, error: (text.invalidWords as (words: string[]) => string)(invalidWords) };
-  }
-
   const placementKeys = new Set(placements.map((placement) => cellKey(placement.x, placement.y)));
   const words = collectedWords.map((word) => scoreWord(boardWithPlacements, placementKeys, word));
-  const bingo = placements.length === wordTilesRackSize;
-  const score = words.reduce((sum, word) => sum + word.score, 0) + (bingo ? wordTilesBingoBonus : 0);
+  const score = words.reduce((sum, word) => sum + word.score, 0);
 
   return {
     ok: true,
     evaluation: {
       placements,
       words,
-      score,
-      bingo
+      score
     }
   };
 }
@@ -668,6 +712,139 @@ function applyEndgameRackScores(
   };
 }
 
+function playerNameFor(state: WordTilesRuntimeState, context: ServerGameContext, playerId: string): string {
+  return state.players[playerId]?.name ?? context.players.find((player) => player.id === playerId)?.name ?? playerId;
+}
+
+function requiredAcceptancePlayerIds(
+  state: WordTilesRuntimeState,
+  context: ServerGameContext,
+  playerId: string
+): string[] {
+  return state.playerOrder.filter((candidatePlayerId) => {
+    if (candidatePlayerId === playerId) {
+      return false;
+    }
+
+    const livePlayer = context.players.find((player) => player.id === candidatePlayerId);
+    const runtimePlayer = state.players[candidatePlayerId];
+
+    return livePlayer?.connected ?? runtimePlayer?.connected ?? true;
+  });
+}
+
+function createPendingMove(
+  state: WordTilesRuntimeState,
+  player: WordTilesRuntimePlayer,
+  evaluation: MoveEvaluation,
+  context: ServerGameContext
+): WordTilesPendingMoveRuntimeState {
+  const activeTurnPlacedTileCount = state.activeTurn?.playerId === player.playerId ? state.activeTurn.placedTileCount : 0;
+
+  return {
+    id: `word-tiles-${state.moveNumber + 1}-${context.now}-${player.playerId}`,
+    playerId: player.playerId,
+    playerName: player.name,
+    score: evaluation.score,
+    words: evaluation.words,
+    placements: evaluation.placements.map((placement) => ({
+      x: placement.x,
+      y: placement.y,
+      tileId: placement.rackTile.id,
+      letter: placement.tile.letter,
+      score: placement.tile.score,
+      isBlank: placement.tile.isBlank
+    })),
+    preparedPlacements: evaluation.placements,
+    bingo: activeTurnPlacedTileCount + evaluation.placements.length === wordTilesRackSize,
+    createdAt: context.now,
+    acceptedByPlayerIds: [],
+    acceptedByNames: [],
+    requiredAcceptancePlayerIds: requiredAcceptancePlayerIds(state, context, player.playerId)
+  };
+}
+
+function toPublicPendingMove(pendingMove: WordTilesPendingMoveRuntimeState): WordTilesPendingMoveState {
+  return {
+    id: pendingMove.id,
+    playerId: pendingMove.playerId,
+    playerName: pendingMove.playerName,
+    score: pendingMove.score,
+    words: pendingMove.words,
+    placements: pendingMove.placements,
+    bingo: pendingMove.bingo,
+    createdAt: pendingMove.createdAt,
+    acceptedByPlayerIds: pendingMove.acceptedByPlayerIds,
+    acceptedByNames: pendingMove.acceptedByNames,
+    requiredAcceptancePlayerIds: pendingMove.requiredAcceptancePlayerIds,
+    challengedByPlayerId: pendingMove.challengedByPlayerId,
+    challengedByName: pendingMove.challengedByName,
+    challengedAt: pendingMove.challengedAt
+  };
+}
+
+function isPendingMoveAccepted(pendingMove: WordTilesPendingMoveRuntimeState): boolean {
+  return pendingMove.requiredAcceptancePlayerIds.every((playerId) => pendingMove.acceptedByPlayerIds.includes(playerId));
+}
+
+function commitPendingMove(
+  state: WordTilesRuntimeState,
+  pendingMove: WordTilesPendingMoveRuntimeState,
+  context: ServerGameContext
+): WordTilesRuntimeState {
+  const text = textFor(context.language);
+  const activePlayer = state.players[pendingMove.playerId];
+
+  if (!activePlayer) {
+    return rejectMove(state, text.notYourTurn as string, context.now);
+  }
+
+  const board = applyPlacementsToBoard(state.board, pendingMove.preparedPlacements);
+  const usedTileIds = new Set(pendingMove.preparedPlacements.map((placement) => placement.rackTile.id));
+  const remainingRack = activePlayer.rack.filter((tile) => !usedTileIds.has(tile.id));
+  const previousTurn = state.activeTurn?.playerId === activePlayer.playerId
+    ? state.activeTurn
+    : {
+        playerId: activePlayer.playerId,
+        playerName: activePlayer.name,
+        score: 0,
+        words: [],
+        placements: [],
+        acceptedMoveCount: 0,
+        placedTileCount: 0,
+        bingoEligible: false
+      };
+  const placedTileCount = previousTurn.placedTileCount + pendingMove.placements.length;
+  const activeTurn: WordTilesActiveTurnRuntimeState = {
+    ...previousTurn,
+    score: previousTurn.score + pendingMove.score,
+    words: [...previousTurn.words, ...pendingMove.words],
+    placements: [...previousTurn.placements, ...pendingMove.placements],
+    acceptedMoveCount: previousTurn.acceptedMoveCount + 1,
+    placedTileCount,
+    bingoEligible: placedTileCount === wordTilesRackSize
+  };
+  const nextPlayers = {
+    ...state.players,
+    [activePlayer.playerId]: {
+      ...activePlayer,
+      rack: remainingRack
+    }
+  };
+
+  return {
+    ...state,
+    board,
+    players: nextPlayers,
+    pendingMove: undefined,
+    activeTurn,
+    recentCellKeys: pendingMove.placements.map((placement) => cellKey(placement.x, placement.y)),
+    lastError: undefined,
+    message: (text.acceptedMove as (name: string, score: number) => string)(activePlayer.name, activeTurn.score),
+    updatedAt: context.now
+  };
+}
+
 function handlePlay(
   state: WordTilesRuntimeState,
   input: Extract<WordTilesInput, { type: "word-tiles:play" }>,
@@ -680,58 +857,275 @@ function handlePlay(
     return rejectMove(state, text.notYourTurn as string, context.now);
   }
 
+  if (state.pendingMove) {
+    return rejectMove(state, text.pendingMoveActive as string, context.now);
+  }
+
   const result = evaluateMove(state, activePlayer, input, context);
 
   if (!result.ok) {
     return rejectMove(state, result.error, context.now);
   }
 
-  const board = applyPlacementsToBoard(state.board, result.evaluation.placements);
-  const usedTileIds = new Set(result.evaluation.placements.map((placement) => placement.rackTile.id));
-  const remainingRack = activePlayer.rack.filter((tile) => !usedTileIds.has(tile.id));
-  const drawn = drawRack(remainingRack, state.bag);
+  const pendingMove = createPendingMove(state, activePlayer, result.evaluation, context);
+
+  if (pendingMove.requiredAcceptancePlayerIds.length === 0) {
+    return commitPendingMove(
+      {
+        ...state,
+        pendingMove,
+        recentCellKeys: pendingMove.placements.map((placement) => cellKey(placement.x, placement.y))
+      },
+      pendingMove,
+      context
+    );
+  }
+
+  return {
+    ...state,
+    pendingMove,
+    recentCellKeys: pendingMove.placements.map((placement) => cellKey(placement.x, placement.y)),
+    lastError: undefined,
+    message: [
+      (text.pendingMove as (name: string, score: number, words: string[]) => string)(
+        activePlayer.name,
+        pendingMove.score,
+        pendingMove.words.map((word) => word.word)
+      )
+    ].filter(Boolean).join(" "),
+    updatedAt: context.now
+  };
+}
+
+function handleChallenge(
+  state: WordTilesRuntimeState,
+  input: Extract<WordTilesInput, { type: "word-tiles:challenge" }>,
+  context: ServerGameContext
+): WordTilesRuntimeState {
+  const text = textFor(context.language);
+  const pendingMove = state.pendingMove;
+
+  if (!pendingMove) {
+    return rejectMove(state, text.noPendingMove as string, context.now);
+  }
+
+  if (input.pendingMoveId !== pendingMove.id) {
+    return rejectMove(state, text.stalePendingMove as string, context.now);
+  }
+
+  if (input.playerId === pendingMove.playerId) {
+    return rejectMove(state, text.cannotChallengeOwn as string, context.now);
+  }
+
+  if (pendingMove.acceptedByPlayerIds.includes(input.playerId)) {
+    return rejectMove(state, text.alreadyAccepted as string, context.now);
+  }
+
+  if (pendingMove.challengedByPlayerId) {
+    return rejectMove(state, text.alreadyChallenged as string, context.now);
+  }
+
+  const challenger = state.players[input.playerId];
+  const challengerName =
+    challenger?.name ??
+    context.players.find((player) => player.id === input.playerId)?.name ??
+    input.playerId;
+  const challengedPendingMove: WordTilesPendingMoveRuntimeState = {
+    ...pendingMove,
+    challengedByPlayerId: input.playerId,
+    challengedByName: challengerName,
+    challengedAt: context.now
+  };
+
+  return {
+    ...state,
+    pendingMove: challengedPendingMove,
+    lastError: undefined,
+    message: (text.challenged as (challengerName: string, playerName: string) => string)(
+      challengerName,
+      pendingMove.playerName
+    ),
+    updatedAt: context.now
+  };
+}
+
+function handleAcceptPendingMove(
+  state: WordTilesRuntimeState,
+  input: Extract<WordTilesInput, { type: "word-tiles:accept" }>,
+  context: ServerGameContext
+): WordTilesRuntimeState {
+  const text = textFor(context.language);
+  const pendingMove = state.pendingMove;
+
+  if (!pendingMove) {
+    return rejectMove(state, text.noPendingMove as string, context.now);
+  }
+
+  if (input.pendingMoveId !== pendingMove.id) {
+    return rejectMove(state, text.stalePendingMove as string, context.now);
+  }
+
+  if (input.playerId === pendingMove.playerId) {
+    return rejectMove(state, text.cannotAcceptOwn as string, context.now);
+  }
+
+  if (pendingMove.challengedByPlayerId) {
+    return rejectMove(state, text.alreadyChallenged as string, context.now);
+  }
+
+  if (pendingMove.acceptedByPlayerIds.includes(input.playerId)) {
+    return rejectMove(state, text.alreadyAccepted as string, context.now);
+  }
+
+  if (!pendingMove.requiredAcceptancePlayerIds.includes(input.playerId)) {
+    return rejectMove(state, text.alreadyAccepted as string, context.now);
+  }
+
+  const acceptedPendingMove: WordTilesPendingMoveRuntimeState = {
+    ...pendingMove,
+    acceptedByPlayerIds: [...pendingMove.acceptedByPlayerIds, input.playerId],
+    acceptedByNames: [...pendingMove.acceptedByNames, playerNameFor(state, context, input.playerId)]
+  };
+
+  if (isPendingMoveAccepted(acceptedPendingMove)) {
+    return commitPendingMove(
+      {
+        ...state,
+        pendingMove: acceptedPendingMove
+      },
+      acceptedPendingMove,
+      context
+    );
+  }
+
+  return {
+    ...state,
+    pendingMove: acceptedPendingMove,
+    lastError: undefined,
+    message: (text.acceptedWaiting as (name: string, accepted: number, required: number) => string)(
+      playerNameFor(state, context, input.playerId),
+      acceptedPendingMove.acceptedByPlayerIds.length,
+      acceptedPendingMove.requiredAcceptancePlayerIds.length
+    ),
+    updatedAt: context.now
+  };
+}
+
+function handleConfirmPendingMove(
+  state: WordTilesRuntimeState,
+  input: Extract<WordTilesInput, { type: "word-tiles:confirm" }>,
+  context: ServerGameContext
+): WordTilesRuntimeState {
+  const text = textFor(context.language);
+  const pendingMove = state.pendingMove;
+
+  if (!pendingMove) {
+    return rejectMove(state, text.noPendingMove as string, context.now);
+  }
+
+  if (input.pendingMoveId !== pendingMove.id) {
+    return rejectMove(state, text.stalePendingMove as string, context.now);
+  }
+
+  if (input.playerId !== pendingMove.playerId) {
+    return rejectMove(state, text.notPendingPlayer as string, context.now);
+  }
+
+  return commitPendingMove(state, pendingMove, context);
+}
+
+function handleRecallPendingMove(
+  state: WordTilesRuntimeState,
+  input: Extract<WordTilesInput, { type: "word-tiles:recall" }>,
+  context: ServerGameContext
+): WordTilesRuntimeState {
+  const text = textFor(context.language);
+  const pendingMove = state.pendingMove;
+
+  if (!pendingMove) {
+    return rejectMove(state, text.noPendingMove as string, context.now);
+  }
+
+  if (input.pendingMoveId !== pendingMove.id) {
+    return rejectMove(state, text.stalePendingMove as string, context.now);
+  }
+
+  if (input.playerId !== pendingMove.playerId) {
+    return rejectMove(state, text.notPendingPlayer as string, context.now);
+  }
+
+  if (!pendingMove.challengedByPlayerId) {
+    return rejectMove(state, text.notChallenged as string, context.now);
+  }
+
+  return {
+    ...state,
+    pendingMove: undefined,
+    recentCellKeys: [],
+    lastError: undefined,
+    message: (text.recalled as (name: string) => string)(pendingMove.playerName),
+    updatedAt: context.now
+  };
+}
+
+function handleFinishTurn(
+  state: WordTilesRuntimeState,
+  input: Extract<WordTilesInput, { type: "word-tiles:finish" }>,
+  context: ServerGameContext
+): WordTilesRuntimeState {
+  const activePlayer = resolveActivePlayer(state);
+  const text = textFor(context.language);
+
+  if (!activePlayer || input.playerId !== activePlayer.playerId) {
+    return rejectMove(state, text.notYourTurn as string, context.now);
+  }
+
+  if (state.pendingMove) {
+    return rejectMove(state, text.pendingMoveActive as string, context.now);
+  }
+
+  if (!state.activeTurn || state.activeTurn.playerId !== activePlayer.playerId) {
+    return rejectMove(state, text.noActiveTurn as string, context.now);
+  }
+
+  const bingo = state.activeTurn.bingoEligible;
+  const score = state.activeTurn.score + (bingo ? wordTilesBingoBonus : 0);
+  const drawn = drawRack(activePlayer.rack, state.bag);
   const nextPlayers = {
     ...state.players,
     [activePlayer.playerId]: {
       ...activePlayer,
-      score: activePlayer.score + result.evaluation.score,
+      score: activePlayer.score + score,
       rack: drawn.rack
     }
   };
   const moveSummary: WordTilesMoveSummaryState = {
     playerId: activePlayer.playerId,
     playerName: activePlayer.name,
-    score: result.evaluation.score,
-    words: result.evaluation.words,
-    placements: result.evaluation.placements.map((placement) => ({
-      x: placement.x,
-      y: placement.y,
-      tileId: placement.rackTile.id,
-      letter: placement.tile.letter,
-      score: placement.tile.score,
-      isBlank: placement.tile.isBlank
-    })),
-    bingo: result.evaluation.bingo,
-    reason: result.evaluation.bingo ? (text.bingo as string) : undefined
+    score,
+    words: state.activeTurn.words,
+    placements: state.activeTurn.placements,
+    bingo,
+    reason: bingo ? (text.bingo as string) : undefined
   };
   const message = [
-    (text.played as (name: string, score: number, words: string[]) => string)(
+    (text.finished as (name: string, score: number, words: string[]) => string)(
       activePlayer.name,
-      result.evaluation.score,
-      result.evaluation.words.map((word) => word.word)
+      score,
+      state.activeTurn.words.map((word) => word.word)
     ),
-    result.evaluation.bingo ? (text.bingo as string) : ""
+    bingo ? (text.bingo as string) : ""
   ].filter(Boolean).join(" ");
   let nextState: WordTilesRuntimeState = {
     ...state,
-    board,
     players: nextPlayers,
     bag: drawn.bag,
     activePlayerIndex: advanceTurn(state),
     moveNumber: state.moveNumber + 1,
     consecutivePasses: 0,
-    recentCellKeys: result.evaluation.placements.map((placement) => cellKey(placement.x, placement.y)),
+    recentCellKeys: state.activeTurn.placements.map((placement) => cellKey(placement.x, placement.y)),
     lastMove: moveSummary,
+    activeTurn: undefined,
     lastError: undefined,
     message,
     updatedAt: context.now
@@ -755,6 +1149,14 @@ function handlePass(
 
   if (!activePlayer || input.playerId !== activePlayer.playerId) {
     return rejectMove(state, text.notYourTurn as string, context.now);
+  }
+
+  if (state.pendingMove) {
+    return rejectMove(state, text.pendingMoveActive as string, context.now);
+  }
+
+  if (state.activeTurn) {
+    return rejectMove(state, text.finishTurnFirst as string, context.now);
   }
 
   const nextState: WordTilesRuntimeState = {
@@ -793,6 +1195,14 @@ function handleExchange(
 
   if (!activePlayer || input.playerId !== activePlayer.playerId) {
     return rejectMove(state, text.notYourTurn as string, context.now);
+  }
+
+  if (state.pendingMove) {
+    return rejectMove(state, text.pendingMoveActive as string, context.now);
+  }
+
+  if (state.activeTurn) {
+    return rejectMove(state, text.finishTurnFirst as string, context.now);
   }
 
   const tileIds = [...new Set(input.tileIds)];
@@ -885,6 +1295,9 @@ function buildPublicState(state: WordTilesRuntimeState, context: ServerGameConte
   const recentCells = new Set(state.recentCellKeys);
   const activePlayer = resolveActivePlayer(state);
   const playerSummaries = new Map(context.players.map((player) => [player.id, player]));
+  const boardWithPendingMove = state.pendingMove
+    ? applyPlacementsToBoard(state.board, state.pendingMove.preparedPlacements)
+    : state.board;
   const board: WordTilesBoardCellState[] = [];
 
   for (let y = 0; y < wordTilesBoardSize; y += 1) {
@@ -893,7 +1306,7 @@ function buildPublicState(state: WordTilesRuntimeState, context: ServerGameConte
         x,
         y,
         bonus: resolveWordTilesBonus(x, y),
-        tile: getBoardTile(state.board, x, y),
+        tile: getBoardTile(boardWithPendingMove, x, y),
         recent: recentCells.has(cellKey(x, y))
       });
     }
@@ -902,13 +1315,15 @@ function buildPublicState(state: WordTilesRuntimeState, context: ServerGameConte
   const players: WordTilesPlayerPublicState[] = state.playerOrder.map((playerId) => {
     const player = state.players[playerId];
     const livePlayer = playerSummaries.get(playerId);
+    const pendingRackTiles =
+      state.pendingMove?.playerId === playerId ? state.pendingMove.placements.length : 0;
 
     return {
       playerId,
       name: livePlayer?.name ?? player?.name ?? playerId,
       color: livePlayer?.color ?? player?.color ?? "#38bdf8",
       score: player?.score ?? 0,
-      rackCount: player?.rack.length ?? 0,
+      rackCount: Math.max(0, (player?.rack.length ?? 0) - pendingRackTiles),
       connected: livePlayer?.connected ?? player?.connected ?? false
     };
   });
@@ -926,6 +1341,8 @@ function buildPublicState(state: WordTilesRuntimeState, context: ServerGameConte
     winnerPlayerId: state.winnerPlayerId,
     winnerName: state.winnerName,
     lastMove: state.lastMove,
+    pendingMove: state.pendingMove ? toPublicPendingMove(state.pendingMove) : undefined,
+    activeTurn: state.activeTurn,
     lastError: state.lastError,
     tileValues: wordTilesLetterValues
   };
@@ -964,6 +1381,26 @@ export const serverGame: ServerGame<
       return handleExchange(state, input, context);
     }
 
+    if (input.type === "word-tiles:challenge") {
+      return handleChallenge(state, input, context);
+    }
+
+    if (input.type === "word-tiles:accept") {
+      return handleAcceptPendingMove(state, input, context);
+    }
+
+    if (input.type === "word-tiles:confirm") {
+      return handleConfirmPendingMove(state, input, context);
+    }
+
+    if (input.type === "word-tiles:recall") {
+      return handleRecallPendingMove(state, input, context);
+    }
+
+    if (input.type === "word-tiles:finish") {
+      return handleFinishTurn(state, input, context);
+    }
+
     return state;
   },
   isRoundFinished(state) {
@@ -987,11 +1424,50 @@ export const serverGame: ServerGame<
     const publicState = buildPublicState(state, context);
     const activePlayer = resolveActivePlayer(state);
     const player = state.players[playerId];
+    const pendingRackTileIds = new Set(
+      state.pendingMove?.playerId === playerId
+        ? state.pendingMove.preparedPlacements.map((placement) => placement.rackTile.id)
+        : []
+    );
 
     return {
       ...publicState,
-      rack: player?.rack ?? [],
-      canAct: Boolean(activePlayer && activePlayer.playerId === playerId && !state.gameOver)
+      rack: player?.rack.filter((tile) => !pendingRackTileIds.has(tile.id)) ?? [],
+      canAct: Boolean(activePlayer && activePlayer.playerId === playerId && !state.pendingMove && !state.gameOver),
+      canAcceptPendingMove: Boolean(
+        state.pendingMove &&
+          state.pendingMove.playerId !== playerId &&
+          !state.pendingMove.challengedByPlayerId &&
+          state.pendingMove.requiredAcceptancePlayerIds.includes(playerId) &&
+          !state.pendingMove.acceptedByPlayerIds.includes(playerId) &&
+          !state.gameOver
+      ),
+      canChallenge: Boolean(
+        state.pendingMove &&
+          state.pendingMove.playerId !== playerId &&
+          !state.pendingMove.challengedByPlayerId &&
+          !state.pendingMove.acceptedByPlayerIds.includes(playerId) &&
+          !state.gameOver
+      ),
+      canResolvePendingMove: Boolean(
+        state.pendingMove &&
+          state.pendingMove.playerId === playerId &&
+          state.pendingMove.challengedByPlayerId &&
+          !state.gameOver
+      ),
+      canRecallPendingMove: Boolean(
+        state.pendingMove &&
+          state.pendingMove.playerId === playerId &&
+          state.pendingMove.challengedByPlayerId &&
+          !state.gameOver
+      ),
+      canFinishTurn: Boolean(
+        activePlayer &&
+          activePlayer.playerId === playerId &&
+          state.activeTurn?.playerId === playerId &&
+          !state.pendingMove &&
+          !state.gameOver
+      )
     };
   }
 };
