@@ -27,11 +27,17 @@ import {
   createWordTilesBag,
   resolveWordTilesBonus,
   wordTilesBingoBonus,
+  wordTilesBlankLettersFor,
   wordTilesBoardSize,
-  wordTilesLetterValues,
+  wordTilesLetterValuesFor,
   wordTilesRackSize
 } from "./wordTilesTiles.js";
 
+// Frist, nach der ein getrennter Spieler automatisch uebersprungen wird
+// (nur bei Disconnect - verbundene Spieler haben unbegrenzt Zeit).
+const wordTilesDisconnectGraceMs = 60_000;
+
+// Fisher-Yates-Shuffle.
 function shuffle<T>(items: T[]): T[] {
   const nextItems = [...items];
 
@@ -68,6 +74,8 @@ interface WordTilesRuntimeState extends BaseRoundState {
   pendingMove?: WordTilesPendingMoveRuntimeState;
   activeTurn?: WordTilesActiveTurnRuntimeState;
   lastError?: string;
+  lastErrorPlayerId?: string;
+  disconnectedAtByPlayerId: Record<string, number>;
 }
 
 interface PreparedPlacement {
@@ -94,8 +102,6 @@ interface WordTilesPendingMoveRuntimeState extends WordTilesPendingMoveState {
 }
 
 interface WordTilesActiveTurnRuntimeState extends WordTilesActiveTurnState {}
-
-const playableBlankLetters = "ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ".split("");
 
 function normalizeWordTilesLetter(letter: string): string {
   return Array.from(letter.trim().toLocaleUpperCase("de-DE"))[0] ?? "";
@@ -149,7 +155,10 @@ const wordTilesText = {
     exchangeEmpty: "Waehle mindestens einen Stein zum Tauschen.",
     exchangeBag: "Im Beutel sind nicht genug Steine zum Tauschen.",
     gameOver: (name: string) => `${name} gewinnt Word Tiles.`,
-    draw: "Word Tiles endet unentschieden."
+    draw: "Word Tiles endet unentschieden.",
+    acceptNotRequired: "Deine Akzeptanz ist fuer diesen Zug nicht noetig.",
+    disconnectTimeout: (name: string) => `${name} ist zu lange getrennt.`,
+    turnSkipped: (name: string) => `${name}s Zug wird uebersprungen.`
   },
   en: {
     intro: "Word Tiles: Place words on the shared board.",
@@ -198,7 +207,10 @@ const wordTilesText = {
     exchangeEmpty: "Choose at least one tile to exchange.",
     exchangeBag: "There are not enough tiles left in the bag.",
     gameOver: (name: string) => `${name} wins Word Tiles.`,
-    draw: "Word Tiles ends in a draw."
+    draw: "Word Tiles ends in a draw.",
+    acceptNotRequired: "Your acceptance is not required for this move.",
+    disconnectTimeout: (name: string) => `${name} has been disconnected for too long.`,
+    turnSkipped: (name: string) => `${name}'s turn is skipped.`
   }
 } satisfies Record<SupportedLanguage, Record<string, unknown>>;
 
@@ -301,12 +313,14 @@ function advanceTurn(state: WordTilesRuntimeState): number {
 function rejectMove(
   state: WordTilesRuntimeState,
   message: string,
-  now: number
+  now: number,
+  playerId?: string
 ): WordTilesRuntimeState {
+  // Fehler sind privat: nur der Verursacher sieht sie (siehe toControllerStateForPlayer).
   return {
     ...state,
     lastError: message,
-    message,
+    lastErrorPlayerId: playerId,
     updatedAt: now
   };
 }
@@ -356,7 +370,7 @@ function preparePlacements(
     const normalizedLetter = normalizeWordTilesLetter(inputPlacement.letter);
 
     if (rackTile.isBlank) {
-      if (!playableBlankLetters.includes(normalizedLetter)) {
+      if (!wordTilesBlankLettersFor(language).includes(normalizedLetter)) {
         return { ok: false, error: text.badBlank as string };
       }
     } else if (normalizedLetter !== rackTile.letter) {
@@ -583,6 +597,49 @@ function scoreWord(
   };
 }
 
+function collectTurnWords(
+  board: Array<Array<WordTilesPlacedTileState | null>>,
+  turnCellKeys: Set<string>,
+  turnCells: Array<{ x: number; y: number }>
+): CollectedWord[] {
+  const words = new Map<string, CollectedWord>();
+
+  for (const cell of turnCells) {
+    for (const [dx, dy, direction] of [
+      [1, 0, "h"],
+      [0, 1, "v"]
+    ] as const) {
+      const word = collectWord(board, turnCellKeys, cell.x, cell.y, dx, dy);
+
+      if (word.word.length < 2 || !word.includesNewTile) {
+        continue;
+      }
+
+      const first = word.cells[0];
+      words.set(`${direction}:${first.x}:${first.y}`, word);
+    }
+  }
+
+  return [...words.values()];
+}
+
+// Wertet alle in diesem Zug gelegten Steine gegen den uebergebenen Brettstand.
+// Jedes Wort zaehlt genau einmal in seiner finalen Form; Praemienfelder gelten
+// weiterhin nur fuer die in diesem Zug gelegten Steine.
+function evaluateTurnPlacements(
+  board: Array<Array<WordTilesPlacedTileState | null>>,
+  turnPlacements: Array<{ x: number; y: number }>
+): { words: WordTilesWordScoreState[]; score: number } {
+  const turnCellKeys = new Set(turnPlacements.map((placement) => cellKey(placement.x, placement.y)));
+  const collected = collectTurnWords(board, turnCellKeys, turnPlacements);
+  const words = collected.map((word) => scoreWord(board, turnCellKeys, word));
+
+  return {
+    words,
+    score: words.reduce((sum, word) => sum + word.score, 0)
+  };
+}
+
 function evaluateMove(
   state: WordTilesRuntimeState,
   player: WordTilesRuntimePlayer,
@@ -628,14 +685,26 @@ function evaluateMove(
 
   const placementKeys = new Set(placements.map((placement) => cellKey(placement.x, placement.y)));
   const words = collectedWords.map((word) => scoreWord(boardWithPlacements, placementKeys, word));
-  const score = words.reduce((sum, word) => sum + word.score, 0);
+  // Der Zug wird erst am Ende ueber den finalen Brettstand gewertet. Die
+  // Punktzahl dieses Teil-Zugs ist deshalb die Differenz zum bisherigen
+  // Zug-Zwischenstand, nicht die Summe der Einzelwoerter.
+  const previousTurnPlacements =
+    state.activeTurn?.playerId === player.playerId ? state.activeTurn.placements : [];
+  const turnScoreBefore =
+    previousTurnPlacements.length > 0
+      ? evaluateTurnPlacements(state.board, previousTurnPlacements).score
+      : 0;
+  const turnScoreAfter = evaluateTurnPlacements(boardWithPlacements, [
+    ...previousTurnPlacements,
+    ...placements
+  ]).score;
 
   return {
     ok: true,
     evaluation: {
       placements,
       words,
-      score
+      score: turnScoreAfter - turnScoreBefore
     }
   };
 }
@@ -705,6 +774,30 @@ function applyEndgameRackScores(
       score: finisher.score + finisherBonus
     };
   }
+
+  return {
+    ...state,
+    players
+  };
+}
+
+// Spielende durch Passen/Tauschen: Jeder Spieler bekommt die Punkte seiner
+// verbliebenen Racksteine abgezogen (analog zum Ende durch Rack-Leeren, nur
+// ohne Finisher-Bonus).
+function applyPassOutRackScores(state: WordTilesRuntimeState): WordTilesRuntimeState {
+  const players = Object.fromEntries(
+    Object.values(state.players).map((player) => {
+      const rackPenalty = player.rack.reduce((sum, tile) => sum + tile.score, 0);
+
+      return [
+        player.playerId,
+        {
+          ...player,
+          score: player.score - rackPenalty
+        }
+      ];
+    })
+  );
 
   return {
     ...state,
@@ -796,7 +889,7 @@ function commitPendingMove(
   const activePlayer = state.players[pendingMove.playerId];
 
   if (!activePlayer) {
-    return rejectMove(state, text.notYourTurn as string, context.now);
+    return rejectMove(state, text.notYourTurn as string, context.now, pendingMove.playerId);
   }
 
   const board = applyPlacementsToBoard(state.board, pendingMove.preparedPlacements);
@@ -815,11 +908,16 @@ function commitPendingMove(
         bingoEligible: false
       };
   const placedTileCount = previousTurn.placedTileCount + pendingMove.placements.length;
+  const turnPlacements = [...previousTurn.placements, ...pendingMove.placements];
+  // Zug-Ende-Wertung: Der gesamte Zug wird immer ueber den aktuellen Brettstand
+  // neu berechnet. Dadurch zaehlt ein im selben Zug erweitertes Wort (HAUS ->
+  // HAUSE -> HAUSES) nur einmal in seiner finalen Form.
+  const turnEvaluation = evaluateTurnPlacements(board, turnPlacements);
   const activeTurn: WordTilesActiveTurnRuntimeState = {
     ...previousTurn,
-    score: previousTurn.score + pendingMove.score,
-    words: [...previousTurn.words, ...pendingMove.words],
-    placements: [...previousTurn.placements, ...pendingMove.placements],
+    score: turnEvaluation.score,
+    words: turnEvaluation.words,
+    placements: turnPlacements,
     acceptedMoveCount: previousTurn.acceptedMoveCount + 1,
     placedTileCount,
     bingoEligible: placedTileCount === wordTilesRackSize
@@ -854,17 +952,17 @@ function handlePlay(
   const text = textFor(context.language);
 
   if (!activePlayer || input.playerId !== activePlayer.playerId) {
-    return rejectMove(state, text.notYourTurn as string, context.now);
+    return rejectMove(state, text.notYourTurn as string, context.now, input.playerId);
   }
 
   if (state.pendingMove) {
-    return rejectMove(state, text.pendingMoveActive as string, context.now);
+    return rejectMove(state, text.pendingMoveActive as string, context.now, input.playerId);
   }
 
   const result = evaluateMove(state, activePlayer, input, context);
 
   if (!result.ok) {
-    return rejectMove(state, result.error, context.now);
+    return rejectMove(state, result.error, context.now, input.playerId);
   }
 
   const pendingMove = createPendingMove(state, activePlayer, result.evaluation, context);
@@ -906,23 +1004,23 @@ function handleChallenge(
   const pendingMove = state.pendingMove;
 
   if (!pendingMove) {
-    return rejectMove(state, text.noPendingMove as string, context.now);
+    return rejectMove(state, text.noPendingMove as string, context.now, input.playerId);
   }
 
   if (input.pendingMoveId !== pendingMove.id) {
-    return rejectMove(state, text.stalePendingMove as string, context.now);
+    return rejectMove(state, text.stalePendingMove as string, context.now, input.playerId);
   }
 
   if (input.playerId === pendingMove.playerId) {
-    return rejectMove(state, text.cannotChallengeOwn as string, context.now);
+    return rejectMove(state, text.cannotChallengeOwn as string, context.now, input.playerId);
   }
 
   if (pendingMove.acceptedByPlayerIds.includes(input.playerId)) {
-    return rejectMove(state, text.alreadyAccepted as string, context.now);
+    return rejectMove(state, text.alreadyAccepted as string, context.now, input.playerId);
   }
 
   if (pendingMove.challengedByPlayerId) {
-    return rejectMove(state, text.alreadyChallenged as string, context.now);
+    return rejectMove(state, text.alreadyChallenged as string, context.now, input.playerId);
   }
 
   const challenger = state.players[input.playerId];
@@ -958,27 +1056,27 @@ function handleAcceptPendingMove(
   const pendingMove = state.pendingMove;
 
   if (!pendingMove) {
-    return rejectMove(state, text.noPendingMove as string, context.now);
+    return rejectMove(state, text.noPendingMove as string, context.now, input.playerId);
   }
 
   if (input.pendingMoveId !== pendingMove.id) {
-    return rejectMove(state, text.stalePendingMove as string, context.now);
+    return rejectMove(state, text.stalePendingMove as string, context.now, input.playerId);
   }
 
   if (input.playerId === pendingMove.playerId) {
-    return rejectMove(state, text.cannotAcceptOwn as string, context.now);
+    return rejectMove(state, text.cannotAcceptOwn as string, context.now, input.playerId);
   }
 
   if (pendingMove.challengedByPlayerId) {
-    return rejectMove(state, text.alreadyChallenged as string, context.now);
+    return rejectMove(state, text.alreadyChallenged as string, context.now, input.playerId);
   }
 
   if (pendingMove.acceptedByPlayerIds.includes(input.playerId)) {
-    return rejectMove(state, text.alreadyAccepted as string, context.now);
+    return rejectMove(state, text.alreadyAccepted as string, context.now, input.playerId);
   }
 
   if (!pendingMove.requiredAcceptancePlayerIds.includes(input.playerId)) {
-    return rejectMove(state, text.alreadyAccepted as string, context.now);
+    return rejectMove(state, text.acceptNotRequired as string, context.now, input.playerId);
   }
 
   const acceptedPendingMove: WordTilesPendingMoveRuntimeState = {
@@ -1020,15 +1118,15 @@ function handleConfirmPendingMove(
   const pendingMove = state.pendingMove;
 
   if (!pendingMove) {
-    return rejectMove(state, text.noPendingMove as string, context.now);
+    return rejectMove(state, text.noPendingMove as string, context.now, input.playerId);
   }
 
   if (input.pendingMoveId !== pendingMove.id) {
-    return rejectMove(state, text.stalePendingMove as string, context.now);
+    return rejectMove(state, text.stalePendingMove as string, context.now, input.playerId);
   }
 
   if (input.playerId !== pendingMove.playerId) {
-    return rejectMove(state, text.notPendingPlayer as string, context.now);
+    return rejectMove(state, text.notPendingPlayer as string, context.now, input.playerId);
   }
 
   return commitPendingMove(state, pendingMove, context);
@@ -1043,19 +1141,19 @@ function handleRecallPendingMove(
   const pendingMove = state.pendingMove;
 
   if (!pendingMove) {
-    return rejectMove(state, text.noPendingMove as string, context.now);
+    return rejectMove(state, text.noPendingMove as string, context.now, input.playerId);
   }
 
   if (input.pendingMoveId !== pendingMove.id) {
-    return rejectMove(state, text.stalePendingMove as string, context.now);
+    return rejectMove(state, text.stalePendingMove as string, context.now, input.playerId);
   }
 
   if (input.playerId !== pendingMove.playerId) {
-    return rejectMove(state, text.notPendingPlayer as string, context.now);
+    return rejectMove(state, text.notPendingPlayer as string, context.now, input.playerId);
   }
 
   if (!pendingMove.challengedByPlayerId) {
-    return rejectMove(state, text.notChallenged as string, context.now);
+    return rejectMove(state, text.notChallenged as string, context.now, input.playerId);
   }
 
   return {
@@ -1077,15 +1175,15 @@ function handleFinishTurn(
   const text = textFor(context.language);
 
   if (!activePlayer || input.playerId !== activePlayer.playerId) {
-    return rejectMove(state, text.notYourTurn as string, context.now);
+    return rejectMove(state, text.notYourTurn as string, context.now, input.playerId);
   }
 
   if (state.pendingMove) {
-    return rejectMove(state, text.pendingMoveActive as string, context.now);
+    return rejectMove(state, text.pendingMoveActive as string, context.now, input.playerId);
   }
 
   if (!state.activeTurn || state.activeTurn.playerId !== activePlayer.playerId) {
-    return rejectMove(state, text.noActiveTurn as string, context.now);
+    return rejectMove(state, text.noActiveTurn as string, context.now, input.playerId);
   }
 
   const bingo = state.activeTurn.bingoEligible;
@@ -1148,15 +1246,15 @@ function handlePass(
   const text = textFor(context.language);
 
   if (!activePlayer || input.playerId !== activePlayer.playerId) {
-    return rejectMove(state, text.notYourTurn as string, context.now);
+    return rejectMove(state, text.notYourTurn as string, context.now, input.playerId);
   }
 
   if (state.pendingMove) {
-    return rejectMove(state, text.pendingMoveActive as string, context.now);
+    return rejectMove(state, text.pendingMoveActive as string, context.now, input.playerId);
   }
 
   if (state.activeTurn) {
-    return rejectMove(state, text.finishTurnFirst as string, context.now);
+    return rejectMove(state, text.finishTurnFirst as string, context.now, input.playerId);
   }
 
   const nextState: WordTilesRuntimeState = {
@@ -1179,7 +1277,7 @@ function handlePass(
   };
 
   if (nextState.consecutivePasses >= Math.max(2, state.playerOrder.length * 2)) {
-    return finishGame(nextState, context);
+    return finishGame(applyPassOutRackScores(nextState), context);
   }
 
   return nextState;
@@ -1194,25 +1292,25 @@ function handleExchange(
   const text = textFor(context.language);
 
   if (!activePlayer || input.playerId !== activePlayer.playerId) {
-    return rejectMove(state, text.notYourTurn as string, context.now);
+    return rejectMove(state, text.notYourTurn as string, context.now, input.playerId);
   }
 
   if (state.pendingMove) {
-    return rejectMove(state, text.pendingMoveActive as string, context.now);
+    return rejectMove(state, text.pendingMoveActive as string, context.now, input.playerId);
   }
 
   if (state.activeTurn) {
-    return rejectMove(state, text.finishTurnFirst as string, context.now);
+    return rejectMove(state, text.finishTurnFirst as string, context.now, input.playerId);
   }
 
   const tileIds = [...new Set(input.tileIds)];
 
   if (tileIds.length === 0) {
-    return rejectMove(state, text.exchangeEmpty as string, context.now);
+    return rejectMove(state, text.exchangeEmpty as string, context.now, input.playerId);
   }
 
   if (state.bag.length < tileIds.length) {
-    return rejectMove(state, text.exchangeBag as string, context.now);
+    return rejectMove(state, text.exchangeBag as string, context.now, input.playerId);
   }
 
   const rackById = new Map(activePlayer.rack.map((tile) => [tile.id, tile]));
@@ -1222,7 +1320,7 @@ function handleExchange(
     const tile = rackById.get(tileId);
 
     if (!tile) {
-      return rejectMove(state, text.unknownTile as string, context.now);
+      return rejectMove(state, text.unknownTile as string, context.now, input.playerId);
     }
 
     exchangedTiles.push(tile);
@@ -1261,14 +1359,14 @@ function handleExchange(
   };
 
   if (nextState.consecutivePasses >= Math.max(2, state.playerOrder.length * 2)) {
-    return finishGame(nextState, context);
+    return finishGame(applyPassOutRackScores(nextState), context);
   }
 
   return nextState;
 }
 
 function createRuntimeState(context: ServerGameContext): WordTilesRuntimeState {
-  const shuffledBag = shuffle(createWordTilesBag());
+  const shuffledBag = shuffle(createWordTilesBag(context.language));
   const runtime = createRuntimePlayers(context, shuffledBag);
   const activePlayerName = context.players[0]?.name ?? (context.language === "en" ? "Player" : "Spieler");
   const text = textFor(context.language);
@@ -1287,6 +1385,7 @@ function createRuntimeState(context: ServerGameContext): WordTilesRuntimeState {
     consecutivePasses: 0,
     recentCellKeys: [],
     gameOver: false,
+    disconnectedAtByPlayerId: {},
     message: (text.start as (name: string) => string)(activePlayerName)
   };
 }
@@ -1343,8 +1442,155 @@ function buildPublicState(state: WordTilesRuntimeState, context: ServerGameConte
     lastMove: state.lastMove,
     pendingMove: state.pendingMove ? toPublicPendingMove(state.pendingMove) : undefined,
     activeTurn: state.activeTurn,
-    lastError: state.lastError,
-    tileValues: wordTilesLetterValues
+    // Fehler sind privat und werden nur dem Verursacher im Controller-State gezeigt.
+    lastError: undefined,
+    tileValues: wordTilesLetterValuesFor(context.language)
+  };
+}
+
+function isDisconnectExpired(state: WordTilesRuntimeState, playerId: string, now: number): boolean {
+  const disconnectedAt = state.disconnectedAtByPlayerId[playerId];
+  return disconnectedAt !== undefined && now - disconnectedAt >= wordTilesDisconnectGraceMs;
+}
+
+function syncDisconnectTimestamps(
+  state: WordTilesRuntimeState,
+  context: ServerGameContext
+): WordTilesRuntimeState {
+  let changed = false;
+  const next: Record<string, number> = { ...state.disconnectedAtByPlayerId };
+  const liveById = new Map(context.players.map((player) => [player.id, player]));
+
+  for (const playerId of state.playerOrder) {
+    // Spieler, die den Raum ganz verlassen haben, gelten ebenfalls als getrennt.
+    const connected = liveById.get(playerId)?.connected ?? false;
+
+    if (connected) {
+      if (next[playerId] !== undefined) {
+        delete next[playerId];
+        changed = true;
+      }
+    } else if (next[playerId] === undefined) {
+      next[playerId] = context.now;
+      changed = true;
+    }
+  }
+
+  return changed ? { ...state, disconnectedAtByPlayerId: next } : state;
+}
+
+// Solange alle verbunden sind, gibt es keinerlei Zeitlimit. Erst wenn ein
+// Spieler getrennt ist, laeuft eine 60s-Frist. Danach:
+// - wird ein getrennter Pflicht-Akzeptierer aus der Required-Liste entfernt
+//   (verhindert den Deadlock bei offenen Zuegen),
+// - nimmt ein getrennter Besitzer einen angezweifelten Zug automatisch zurueck,
+// - schliesst ein getrennter aktiver Spieler seinen Zug automatisch ab bzw. passt.
+function handleTick(state: WordTilesRuntimeState, context: ServerGameContext): WordTilesRuntimeState {
+  if (state.phase !== "playing" || state.gameOver) {
+    return state;
+  }
+
+  const nextState = syncDisconnectTimestamps(state, context);
+  const text = textFor(context.language);
+  const pendingMove = nextState.pendingMove;
+
+  if (pendingMove) {
+    if (pendingMove.challengedByPlayerId) {
+      if (!isDisconnectExpired(nextState, pendingMove.playerId, context.now)) {
+        return nextState;
+      }
+
+      const recalled = handleRecallPendingMove(
+        nextState,
+        {
+          type: "word-tiles:recall",
+          playerId: pendingMove.playerId,
+          pendingMoveId: pendingMove.id,
+          sentAt: context.now
+        },
+        context
+      );
+
+      return {
+        ...recalled,
+        message: [
+          (text.disconnectTimeout as (name: string) => string)(pendingMove.playerName),
+          recalled.message
+        ].filter(Boolean).join(" ")
+      };
+    }
+
+    const requiredIds = pendingMove.requiredAcceptancePlayerIds.filter(
+      (playerId) => !isDisconnectExpired(nextState, playerId, context.now)
+    );
+
+    if (requiredIds.length === pendingMove.requiredAcceptancePlayerIds.length) {
+      return nextState;
+    }
+
+    const updatedPendingMove: WordTilesPendingMoveRuntimeState = {
+      ...pendingMove,
+      requiredAcceptancePlayerIds: requiredIds
+    };
+
+    if (isPendingMoveAccepted(updatedPendingMove)) {
+      return commitPendingMove(
+        { ...nextState, pendingMove: updatedPendingMove },
+        updatedPendingMove,
+        context
+      );
+    }
+
+    return {
+      ...nextState,
+      pendingMove: updatedPendingMove,
+      updatedAt: context.now
+    };
+  }
+
+  const activePlayer = resolveActivePlayer(nextState);
+
+  if (!activePlayer || !isDisconnectExpired(nextState, activePlayer.playerId, context.now)) {
+    return nextState;
+  }
+
+  const timeoutPrefix = (text.disconnectTimeout as (name: string) => string)(activePlayer.name);
+
+  if (nextState.activeTurn?.playerId === activePlayer.playerId) {
+    const finished = handleFinishTurn(
+      nextState,
+      {
+        type: "word-tiles:finish",
+        playerId: activePlayer.playerId,
+        sentAt: context.now
+      },
+      context
+    );
+
+    return {
+      ...finished,
+      message: [timeoutPrefix, finished.message].filter(Boolean).join(" ")
+    };
+  }
+
+  const passed = handlePass(
+    nextState,
+    {
+      type: "word-tiles:pass",
+      playerId: activePlayer.playerId,
+      sentAt: context.now
+    },
+    context
+  );
+
+  return {
+    ...passed,
+    message: passed.gameOver
+      ? [timeoutPrefix, passed.message].filter(Boolean).join(" ")
+      : [
+          timeoutPrefix,
+          (text.turnSkipped as (name: string) => string)(activePlayer.name)
+        ].filter(Boolean).join(" ")
   };
 }
 
@@ -1403,6 +1649,9 @@ export const serverGame: ServerGame<
 
     return state;
   },
+  tick(state, _deltaMs, context) {
+    return handleTick(state, context);
+  },
   isRoundFinished(state) {
     return state.phase === "playing" && state.gameOver;
   },
@@ -1432,6 +1681,7 @@ export const serverGame: ServerGame<
 
     return {
       ...publicState,
+      lastError: state.lastErrorPlayerId === playerId ? state.lastError : undefined,
       rack: player?.rack.filter((tile) => !pendingRackTileIds.has(tile.id)) ?? [],
       canAct: Boolean(activePlayer && activePlayer.playerId === playerId && !state.pendingMove && !state.gameOver),
       canAcceptPendingMove: Boolean(
@@ -1447,27 +1697,4 @@ export const serverGame: ServerGame<
           state.pendingMove.playerId !== playerId &&
           !state.pendingMove.challengedByPlayerId &&
           !state.pendingMove.acceptedByPlayerIds.includes(playerId) &&
-          !state.gameOver
-      ),
-      canResolvePendingMove: Boolean(
-        state.pendingMove &&
-          state.pendingMove.playerId === playerId &&
-          state.pendingMove.challengedByPlayerId &&
-          !state.gameOver
-      ),
-      canRecallPendingMove: Boolean(
-        state.pendingMove &&
-          state.pendingMove.playerId === playerId &&
-          state.pendingMove.challengedByPlayerId &&
-          !state.gameOver
-      ),
-      canFinishTurn: Boolean(
-        activePlayer &&
-          activePlayer.playerId === playerId &&
-          state.activeTurn?.playerId === playerId &&
-          !state.pendingMove &&
-          !state.gameOver
-      )
-    };
-  }
-};
+          !state.gameO
