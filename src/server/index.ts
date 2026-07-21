@@ -1697,4 +1697,27 @@ export const serverGame: ServerGame<
           state.pendingMove.playerId !== playerId &&
           !state.pendingMove.challengedByPlayerId &&
           !state.pendingMove.acceptedByPlayerIds.includes(playerId) &&
-          !state.gameO
+          !state.gameOver
+      ),
+      canResolvePendingMove: Boolean(
+        state.pendingMove &&
+          state.pendingMove.playerId === playerId &&
+          state.pendingMove.challengedByPlayerId &&
+          !state.gameOver
+      ),
+      canRecallPendingMove: Boolean(
+        state.pendingMove &&
+          state.pendingMove.playerId === playerId &&
+          state.pendingMove.challengedByPlayerId &&
+          !state.gameOver
+      ),
+      canFinishTurn: Boolean(
+        activePlayer &&
+          activePlayer.playerId === playerId &&
+          state.activeTurn?.playerId === playerId &&
+          !state.pendingMove &&
+          !state.gameOver
+      )
+    };
+  }
+};
