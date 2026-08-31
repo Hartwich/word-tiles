@@ -1,17 +1,40 @@
 import Phaser from "phaser";
 import { wordTilesManifest } from "../manifest.js";
 import type { WordTilesBoardCellState, WordTilesPublicState } from "../protocol.js";
+import { renderRoundScreens } from "./roundScreens.js";
+import { bindPlatformTheme, tokens } from "./platformTheme.js";
 
 type SupportedLanguage = "de" | "en";
 
+/**
+ * Word Tiles' host palette, following the platform theme.
+ *
+ * Getters rather than fixed values: the platform mutates its tokens in place
+ * when the room switches skin, so reading at draw time is what keeps the board
+ * in step with the phones.
+ */
 const hostTheme = {
-  bodyFont: '"Nunito Sans", sans-serif',
-  titleFont: '"Fredoka", "Nunito Sans", sans-serif',
-  text: "#e2e8f0",
-  muted: "#94a3b8",
-  accent: "#38bdf8",
-  warning: "#facc15",
-  danger: "#f87171"
+  get bodyFont() {
+    return tokens().font.body;
+  },
+  get titleFont() {
+    return tokens().font.display;
+  },
+  get text() {
+    return tokens().color.text;
+  },
+  get muted() {
+    return tokens().color.muted;
+  },
+  get accent() {
+    return tokens().color.accent;
+  },
+  get warning() {
+    return tokens().color.warning;
+  },
+  get danger() {
+    return tokens().color.danger;
+  }
 };
 
 interface HostClientLike {
@@ -118,9 +141,15 @@ export class WordTilesHostScene extends Phaser.Scene {
   }
 
   create(): void {
+    bindPlatformTheme(this.registry);
     const client = this.registry.get("hostClient") as HostClientLike;
 
     this.unsubscribe = client.subscribe((state) => {
+      // Intro and result screens belong to this game, not the platform.
+      if (renderRoundScreens(this, state)) {
+        return;
+      }
+
       const language = state.room?.language;
       const labels = text(language);
       const gameState =
@@ -203,7 +232,7 @@ export class WordTilesHostScene extends Phaser.Scene {
             .text(centerX, centerY, label, {
               fontFamily: hostTheme.bodyFont,
               fontSize: `${Math.max(9, Math.floor(cell * 0.22))}px`,
-              color: "#e2e8f0",
+              color: tokens().color.textSoft,
               fontStyle: "bold"
             })
             .setOrigin(0.5);

@@ -18,7 +18,12 @@ export const wordTilesManifest = {
     lockedMs: 3_000,
     resultMs: 5_000,
     scoreboardMs: 5_000
-  }
+  },
+
+  ownsScreens: ["round_intro", "result"],
+  visual: { accent: "#7f7350", eyebrow: "Words" },
+  audio: { track: { profile: "gentle", bpm: 104, rootMidi: 55, masterGain: 0.12 } },
+  controllerChrome: { wide: true },
 } as const satisfies GameManifest;
 
 export const manifest = wordTilesManifest;
