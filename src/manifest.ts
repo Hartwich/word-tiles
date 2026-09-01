@@ -21,7 +21,7 @@ export const wordTilesManifest = {
   },
 
   ownsScreens: ["round_intro", "result"],
-  visual: { accent: "#7f7350", eyebrow: "Words" },
+  visual: { accent: "#7f7350", icon: "grid", eyebrow: "Words" },
   audio: { track: { profile: "gentle", bpm: 104, rootMidi: 55, masterGain: 0.12 } },
   controllerChrome: { wide: true },
 } as const satisfies GameManifest;
