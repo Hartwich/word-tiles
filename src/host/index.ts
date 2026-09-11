@@ -2,7 +2,7 @@ import Phaser from "phaser";
 import { wordTilesManifest } from "../manifest.js";
 import type { WordTilesBoardCellState, WordTilesPublicState } from "../protocol.js";
 import { renderRoundScreens } from "./roundScreens.js";
-import { bindPlatformTheme, tokens } from "./platformTheme.js";
+import { bindPlatformTheme, tokenColor, tokens } from "./platformTheme.js";
 
 type SupportedLanguage = "de" | "en";
 
@@ -66,7 +66,7 @@ function bonusFill(bonus: WordTilesBoardCellState["bonus"]): number {
     case "triple_word":
       return 0xb91c1c;
     default:
-      return 0x1e293b;
+      return tokenColor((theme) => theme.color.surfaceMuted);
   }
 }
 
@@ -162,7 +162,7 @@ export class WordTilesHostScene extends Phaser.Scene {
         })));
 
       this.children.removeAll(true);
-      this.cameras.main.setBackgroundColor(0x07111f);
+      this.cameras.main.setBackgroundColor(tokens().color.background);
 
       if (!gameState.board.length) {
         this.add
@@ -195,8 +195,8 @@ export class WordTilesHostScene extends Phaser.Scene {
     const boardX = 38;
     const boardY = (height - boardPixels) / 2 + 22;
 
-    this.add.rectangle(boardX + boardPixels / 2, boardY + boardPixels / 2, boardPixels + 18, boardPixels + 18, 0x020617, 0.92)
-      .setStrokeStyle(2, 0x334155, 0.9);
+    this.add.rectangle(boardX + boardPixels / 2, boardY + boardPixels / 2, boardPixels + 18, boardPixels + 18, tokenColor((theme) => theme.color.surfaceRaised), 1)
+      .setStrokeStyle(2, tokenColor((theme) => theme.color.lineStrong), 0.9);
 
     for (const boardCell of state.board) {
       const x = boardX + boardCell.x * cell;
@@ -204,8 +204,11 @@ export class WordTilesHostScene extends Phaser.Scene {
       const centerX = x + cell / 2;
       const centerY = y + cell / 2;
 
-      this.add.rectangle(centerX, centerY, cell - 2, cell - 2, bonusFill(boardCell.bonus), boardCell.tile ? 0.22 : 0.72)
-        .setStrokeStyle(boardCell.recent ? 3 : 1, boardCell.recent ? 0xfacc15 : 0x475569, boardCell.recent ? 1 : 0.42);
+      // Premium hues tint the current board surface, keeping theme ink legible
+      // on both paper and slate. Tile colours describe game pieces, not chrome.
+      const fillAlpha = boardCell.tile ? 0.22 : boardCell.bonus === "normal" ? 1 : 0.24;
+      this.add.rectangle(centerX, centerY, cell - 2, cell - 2, bonusFill(boardCell.bonus), fillAlpha)
+        .setStrokeStyle(boardCell.recent ? 3 : 1, tokenColor((theme) => boardCell.recent ? theme.color.warning : theme.color.lineStrong), boardCell.recent ? 1 : 0.6);
 
       if (boardCell.tile) {
         this.add.rectangle(centerX, centerY, cell - 6, cell - 6, boardCell.tile.isBlank ? 0xe0f2fe : 0xf1d38d, 1)
@@ -250,8 +253,8 @@ export class WordTilesHostScene extends Phaser.Scene {
     const panelTop = 56;
     const panelHeight = height - 96;
 
-    this.add.rectangle(panelX + panelWidth / 2, panelTop + panelHeight / 2, panelWidth, panelHeight, 0x0f172a, 0.88)
-      .setStrokeStyle(1, 0x334155, 0.9);
+    this.add.rectangle(panelX + panelWidth / 2, panelTop + panelHeight / 2, panelWidth, panelHeight, tokenColor((theme) => theme.color.surface), 0.88)
+      .setStrokeStyle(1, tokenColor((theme) => theme.color.lineStrong), 0.9);
 
     this.add
       .text(panelX + 22, panelTop + 22, "Word Tiles", {
@@ -338,8 +341,8 @@ export class WordTilesHostScene extends Phaser.Scene {
 
     sortedPlayers.forEach((player, index) => {
       const active = player.playerId === state.activePlayerId;
-      this.add.rectangle(panelX + panelWidth / 2, y + 24, panelWidth - 36, 48, active ? 0x064e3b : 0x1e293b, active ? 0.72 : 0.58)
-        .setStrokeStyle(1, active ? 0x22c55e : 0x334155, active ? 0.9 : 0.5);
+      this.add.rectangle(panelX + panelWidth / 2, y + 24, panelWidth - 36, 48, tokenColor((theme) => active ? theme.color.successSoft : theme.color.surfaceMuted), active ? 0.72 : 0.58)
+        .setStrokeStyle(1, tokenColor((theme) => active ? theme.color.success : theme.color.lineStrong), active ? 0.9 : 0.5);
       this.add
         .text(panelX + 28, y + 9, `${index + 1}. ${player.name}`, {
           fontFamily: hostTheme.bodyFont,
