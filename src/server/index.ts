@@ -1269,7 +1269,7 @@ function handlePass(
       words: [],
       placements: [],
       bingo: false,
-      reason: "Pass"
+      reason: context.language === "en" ? "Pass" : "Gepasst"
     },
     lastError: undefined,
     message: (text.pass as (name: string) => string)(activePlayer.name),
@@ -1351,7 +1351,7 @@ function handleExchange(
       words: [],
       placements: [],
       bingo: false,
-      reason: "Exchange"
+      reason: context.language === "en" ? "Exchange" : "Getauscht"
     },
     lastError: undefined,
     message: (text.exchange as (name: string, count: number) => string)(activePlayer.name, tileIds.length),

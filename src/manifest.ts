@@ -1,7 +1,9 @@
+import { wordTilesText } from "./catalogText.js";
 import type { GameManifest } from "@open-party-lab/game-core";
 
 export const wordTilesManifest = {
   id: "word-tiles",
+  translations: wordTilesText,
   displayName: "Word Tiles",
   description: "Lege Woerter auf ein gemeinsames Brett und nutze Premiumfelder geschickt.",
   minPlayers: 2,
